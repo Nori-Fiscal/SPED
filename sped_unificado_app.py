@@ -27,6 +27,25 @@ class ResultadoProcessamento:
     nome_origem: str | None = None
 
 
+def limpar_caracteres_invalidos_xml(valor):
+    if valor is None:
+        return ""
+    texto = str(valor)
+    return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]", "", texto)
+
+
+def limpar_nome_aba(nome):
+    nome = limpar_caracteres_invalidos_xml(nome)
+    nome = nome.strip()
+    nome = re.sub(r'[\[\]\:\*\?\/\\]', '_', nome)
+    nome = nome.strip("'")
+
+    if not nome:
+        nome = "SEM_TIPO"
+
+    return nome[:31]
+
+
 def converter_para_numero(valor):
     if valor is None:
         return 0
@@ -171,17 +190,32 @@ def converter_txt_sped_para_excel_bytes(arquivo_txt_bytes: bytes) -> tuple[bytes
         if linha.startswith('|'):
             partes = linha.split('|')
             if len(partes) > 2:
-                tipo = partes[1].strip() or 'SEM_TIPO'
-                registros_por_tipo[tipo].append(partes[1:-1])
+                tipo_original = partes[1].strip() or 'SEM_TIPO'
+                tipo = limpar_nome_aba(tipo_original)
+                campos = [limpar_caracteres_invalidos_xml(campo) for campo in partes[1:-1]]
+                registros_por_tipo[tipo].append(campos)
 
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        nomes_usados = set()
+
         for tipo, registros in registros_por_tipo.items():
             if len(registros) > 0:
                 max_campos = max(len(r) for r in registros)
                 colunas = [f'Campo_{i}' for i in range(1, max_campos + 1)]
                 df = pd.DataFrame(registros, columns=colunas)
-                aba = tipo[:31] or 'SEM_TIPO'
+
+                aba = limpar_nome_aba(tipo)
+                nome_base = aba
+                contador = 1
+
+                while aba in nomes_usados:
+                    sufixo = f"_{contador}"
+                    aba = f"{nome_base[:31 - len(sufixo)]}{sufixo}"
+                    contador += 1
+
+                nomes_usados.add(aba)
                 df.to_excel(writer, sheet_name=aba, index=False)
                 mensagens.append(f'Aba {aba} criada com {len(df)} linhas.')
 
@@ -220,21 +254,31 @@ def processar_fluxo_completo(arquivo, abas_selecionadas: Iterable[str]) -> Resul
             mensagens.append('Convertendo TXT do SPED para Excel...')
             excel_bytes, msgs_conv = converter_txt_sped_para_excel_bytes(conteudo)
             mensagens.extend(msgs_conv)
+
             mensagens.append('Aplicando tratamento nas abas selecionadas...')
             final_bytes, msgs_proc = processar_excel_sped_bytes(excel_bytes, abas_selecionadas)
             mensagens.extend(msgs_proc)
+
             nome_saida = f"{Path(arquivo.name).stem}_processado.xlsx"
+
         elif nome.endswith('.xlsx'):
             mensagens.append('Processando Excel enviado...')
             final_bytes, msgs_proc = processar_excel_sped_bytes(conteudo, abas_selecionadas)
             mensagens.extend(msgs_proc)
+
             nome_saida = f"{Path(arquivo.name).stem}_processado.xlsx"
+
         else:
-            return ResultadoProcessamento(False, ['Envie arquivos .txt ou .xlsx.'], nome_origem=arquivo.name)
+            return ResultadoProcessamento(
+                False,
+                ['Envie arquivos .txt ou .xlsx.'],
+                nome_origem=arquivo.name
+            )
 
         return ResultadoProcessamento(True, mensagens, nome_saida, final_bytes, arquivo.name)
-    except Exception:
-        mensagens.append('Erro durante o processamento:')
+
+    except Exception as e:
+        mensagens.append(f'Erro durante o processamento: {e}')
         mensagens.append(traceback.format_exc())
         return ResultadoProcessamento(False, mensagens, nome_origem=arquivo.name)
 
